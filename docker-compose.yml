@@ -15,9 +15,10 @@ services:
         build:
             context: .
             dockerfile: Dockerfile
-        image: ghcr.io/caviraoss/longmemory:${LONGMEMORY_IMAGE_TAG:-latest}
+        env_file:
+            - .env
         ports:
-            - '${LONGMEMORY_PORT:-7331}:7331'
+            - '127.0.0.1:${LONGMEMORY_HOST_PORT:-8187}:7331'
         environment:
             LONGMEMORY_HOST: 0.0.0.0
             LONGMEMORY_PORT: 7331
@@ -29,13 +30,13 @@ services:
             LONGMEMORY_RATE_LIMIT_MAX_REQUESTS: ${LONGMEMORY_RATE_LIMIT_MAX_REQUESTS:-100}
             LONGMEMORY_EMBEDDING_PROVIDER: ${LONGMEMORY_EMBEDDING_PROVIDER:-}
             LONGMEMORY_EMBEDDING_TIER: ${LONGMEMORY_EMBEDDING_TIER:-deep}
-            LONGMEMORY_EMBEDDING_FALLBACK: ${LONGMEMORY_EMBEDDING_FALLBACK:-synthetic}
-            LONGMEMORY_EMBEDDING_DIMENSION: ${LONGMEMORY_EMBEDDING_DIMENSION:-1536}
+            LONGMEMORY_EMBEDDING_FALLBACK: ${LONGMEMORY_EMBEDDING_FALLBACK-}
+            LONGMEMORY_EMBEDDING_DIMENSION: ${LONGMEMORY_EMBEDDING_DIMENSION:-${OM_VEC_DIM:-2560}}
             LONGMEMORY_EMBEDDING_TIMEOUT_MS: ${LONGMEMORY_EMBEDDING_TIMEOUT_MS:-30000}
             LONGMEMORY_EMBEDDING_MAX_RETRIES: ${LONGMEMORY_EMBEDDING_MAX_RETRIES:-2}
             LONGMEMORY_EMBEDDING_RETRY_BASE_MS: ${LONGMEMORY_EMBEDDING_RETRY_BASE_MS:-250}
-            LONGMEMORY_OPENAI_BASE_URL: ${LONGMEMORY_OPENAI_BASE_URL:-https://api.openai.com/v1}
-            LONGMEMORY_OPENAI_EMBEDDING_MODEL: ${LONGMEMORY_OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+            LONGMEMORY_OPENAI_BASE_URL: ${LONGMEMORY_OPENAI_BASE_URL:-${OM_OPENAI_BASE_URL:-https://api.openai.com/v1}}
+            LONGMEMORY_OPENAI_EMBEDDING_MODEL: ${LONGMEMORY_OPENAI_EMBEDDING_MODEL:-${OM_OPENAI_MODEL:-text-embedding-3-small}}
             LONGMEMORY_OLLAMA_URL: ${LONGMEMORY_OLLAMA_URL:-http://host.docker.internal:11434}
             LONGMEMORY_OLLAMA_EMBEDDING_MODEL: ${LONGMEMORY_OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
             OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -65,7 +66,7 @@ services:
             context: ./dashboard
             dockerfile: Dockerfile
         ports:
-            - '${LONGMEMORY_DASHBOARD_PORT:-3000}:3000'
+            - '127.0.0.1:${LONGMEMORY_DASHBOARD_PORT:-3000}:3000'
         environment:
             LONGMEMORY_API_URL: http://longmemory:7331
             LONGMEMORY_API_KEY: ${LONGMEMORY_API_KEY:-}
