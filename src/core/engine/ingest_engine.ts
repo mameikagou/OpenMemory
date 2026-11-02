@@ -95,8 +95,18 @@ function relation_edge(type: string, from: string, to: string, at: number): Hydr
     });
 }
 
-function latest_claim(node: HydroNode): ExtractedClaim | undefined {
-    return node.content.claims?.[0] ?? extract_claims(node.content.raw)[0];
+function node_claims(node: HydroNode): readonly ExtractedClaim[] {
+    return node.content.claims ?? extract_claims(node.content.raw);
+}
+
+// unlike claims[0], resolves the specific claim a topic key was registered from,
+// so a turn with several clauses reconciles each one against its own history.
+function claim_by_topic(node: HydroNode, topic: string): ExtractedClaim | undefined {
+    return node_claims(node).find((claim) => claim.topic === topic);
+}
+
+function relationship_key(world_id: string, user_id: unknown, value: string): string {
+    return JSON.stringify([world_id, user_id, value]);
 }
 
 export class IngestEngine {
@@ -114,6 +124,7 @@ export class IngestEngine {
     private readonly current_claim_nodes = new Map<string, string>();
     private readonly grounding_nodes = new Map<string, string>();
     private readonly conversation_nodes = new Map<string, HydroNode[]>();
+    private readonly conversation_members = new Set<string>();
     private relationship_graph_revision = -1;
 
     constructor(options: IngestEngineOptions = {}) {
@@ -169,12 +180,29 @@ export class IngestEngine {
         trace.push({ step: 6, name: 'world', detail: `${world.name} (${world.id})` });
 
         const fact = parsed.zone === 'exocortex' ? this.create_fact(parsed) : null;
-        if (fact) this.worlddb.upsert(fact);
         const grounding = this.find_grounding(parsed, fact);
         const contract = this.contract_for(parsed, world, grounding !== null);
-        const draft = this.create_node(parsed, facets, world, contract, fact, grounding);
+        const draft = this.create_node(parsed, facets, world, contract, fact, grounding,
+            resolved.map(({ mention, result }) => ({ id: result.entity.id, name: result.entity.canonical_name, mention: mention.name })));
         trace.push({ step: 7, name: 'node_staged', detail: `${draft.id} created after entity resolution` });
 
+        const existing = this.graph.get_node(draft.id);
+        if (existing) {
+            if (existing.content_hash !== draft.content_hash || existing.world.world_id !== draft.world.world_id
+                || (existing.metadata.user_id ?? existing.provenance.created_by) !== parsed.event.user_id) {
+                throw new Error(`ingest: refusing identity or scope change for ${draft.id}`);
+            }
+            trace.push({ step: 14, name: 'memory_diff', detail: 'existing durable event reused; lifecycle preserved' });
+            return {
+                node: existing, changed_nodes: [], nodes: [], edges: [], trace,
+                diff: {
+                    created_node_ids: [], updated_node_ids: [], created_edge_ids: [],
+                    resolved_entities: [], world_ids: [existing.world.world_id], worlddb_refs: [],
+                    index_updates: [], sketch_updates: [], consolidated_node_ids: [],
+                },
+            };
+        }
+        if (fact) this.worlddb.upsert(fact);
         const staged_edges = this.relationships_for(draft, parsed, grounding);
         const context_nodes = this.auto_consolidate
             ? this.graph.node_list()
@@ -311,13 +339,17 @@ export class IngestEngine {
         contract: Contract,
         fact: GroundedFact | null,
         grounding: GroundedFact | null,
+        resolved_entities: readonly { id: string; name: string; mention: string }[],
     ): HydroNode {
         const input: HydroNodeInput = {
             id: parsed.event.id ?? fact?.ref,
             content: {
                 raw: parsed.multilingual.original_text,
                 canonical: parsed.multilingual.normalization.canonical_text,
-                summary: summarize_claims(parsed.claims) || parsed.multilingual.normalization.canonical_text,
+                summary: summarize_claims(parsed.claims, parsed.claims.length, {
+                    speaker: parsed.event.speaker,
+                    observed_at: parsed.observed_at,
+                }) || parsed.multilingual.normalization.canonical_text,
                 claims: parsed.claims,
                 language: parsed.multilingual.language,
                 script: parsed.multilingual.script.script,
@@ -357,7 +389,13 @@ export class IngestEngine {
                 ...manual_provenance(parsed.event.source?.id ?? parsed.event.user_id, parsed.observed_at),
                 source_trace: [{ source_id: parsed.event.source?.id ?? parsed.event.user_id, ref: parsed.event.source_ref ?? null, at: parsed.observed_at }],
             },
-            metadata: { ...(parsed.event.metadata ?? {}), ...(parsed.event.conversation_id ? { conversation_id: parsed.event.conversation_id } : {}) },
+            metadata: {
+                ...(parsed.event.metadata ?? {}),
+                user_id: parsed.event.user_id,
+                ...(parsed.event.conversation_id ? { conversation_id: parsed.event.conversation_id } : {}),
+                resolved_entities,
+                ...(parsed.event.speaker ? { speaker: parsed.event.speaker } : {}),
+            },
         };
         return create_hydro_node(input);
     }
@@ -369,17 +407,25 @@ export class IngestEngine {
     ): HydroEdge[] {
         this.ensure_relationship_indexes();
         const edges: HydroEdge[] = [];
-        const incoming = parsed.claims[0];
         const behavior = parsed.event.conflict_behavior ?? 'auto';
-        if (incoming && behavior !== 'none') {
-            const related_id = this.current_claim_nodes.get(incoming.topic);
-            const related_node = related_id ? this.graph.get_node(related_id) : undefined;
-            const related_claim = related_node ? latest_claim(related_node) : undefined;
-            if (related_node && related_claim && related_node.state.status === 'active' && related_node.temporal.superseded_at === null && claims_conflict(incoming, related_claim)) {
-                const type = behavior === 'supersede' ? 'supersedes'
-                    : behavior === 'contradict' ? 'contradicts'
-                        : incoming.kind === 'preference' || parsed.zone === 'exocortex' ? 'supersedes' : 'contradicts';
-                edges.push(relation_edge(type, draft.id, related_node.id, parsed.at));
+        if (behavior !== 'none') {
+            // check every claim extracted from the turn, not just the first one, so a
+            // clause after the opening sentence still reconciles against prior history.
+            const conflicted_targets = new Set<string>();
+            for (const incoming of parsed.claims) {
+                const related_id = this.current_claim_nodes.get(relationship_key(draft.world.world_id, parsed.event.user_id, incoming.topic));
+                if (!related_id || conflicted_targets.has(related_id)) continue;
+                const related_node = this.graph.get_node(related_id);
+                const related_claim = related_node ? claim_by_topic(related_node, incoming.topic) : undefined;
+                if (related_node && related_claim && related_node.state.status === 'active' && related_node.temporal.superseded_at === null
+                    && (behavior !== 'auto' || parsed.valid_from >= related_node.temporal.valid_from)
+                    && claims_conflict(incoming, related_claim)) {
+                    const type = behavior === 'supersede' ? 'supersedes'
+                        : behavior === 'contradict' ? 'contradicts'
+                            : incoming.kind === 'preference' || parsed.zone === 'exocortex' ? 'supersedes' : 'contradicts';
+                    edges.push(relation_edge(type, draft.id, related_node.id, parsed.at));
+                    conflicted_targets.add(related_id);
+                }
             }
         }
         if (parsed.zone === 'endocortex' && grounding) {
@@ -389,25 +435,42 @@ export class IngestEngine {
         }
         const conversation_id = parsed.event.conversation_id;
         if (conversation_id) {
-            const previous = this.previous_conversation_node(conversation_id, parsed.observed_at);
+            const previous = this.previous_conversation_node(relationship_key(draft.world.world_id, parsed.event.user_id, conversation_id), parsed.observed_at, draft.id);
             if (previous) edges.push(relation_edge('refers_to', draft.id, previous.id, parsed.at));
         }
         return edges;
     }
 
     private register_relationship_node(node: HydroNode): void {
-        const claim = latest_claim(node);
-        if (claim && node.state.status === 'active' && node.temporal.superseded_at === null) {
-            const prior_id = this.current_claim_nodes.get(claim.topic);
-            const prior = prior_id ? this.graph.get_node(prior_id) : undefined;
-            if (!prior || prior.temporal.observed_at <= node.temporal.observed_at) this.current_claim_nodes.set(claim.topic, node.id);
+        // register every claim the node carries as the "current" pointer for its topic,
+        // not just the first one, so later clauses remain reachable for future reconciliation.
+        if (node.state.status === 'active' && node.temporal.superseded_at === null) {
+            for (const claim of node_claims(node)) {
+                const key = relationship_key(node.world.world_id, node.metadata.user_id ?? node.provenance.created_by, claim.topic);
+                const prior_id = this.current_claim_nodes.get(key);
+                const prior = prior_id ? this.graph.get_node(prior_id) : undefined;
+                if (!prior || prior.state.status !== 'active' || prior.temporal.superseded_at !== null
+                    || prior.temporal.valid_from < node.temporal.valid_from
+                    || (prior.temporal.valid_from === node.temporal.valid_from && prior.temporal.observed_at <= node.temporal.observed_at)) {
+                    this.current_claim_nodes.set(key, node.id);
+                }
+            }
         }
         if (node.world.zone === 'exocortex' && node.grounding.worlddb_ref) this.grounding_nodes.set(node.grounding.worlddb_ref, node.id);
         const conversation_id = typeof node.metadata.conversation_id === 'string' ? node.metadata.conversation_id : '';
         if (!conversation_id) return;
-        const values = this.conversation_nodes.get(conversation_id) ?? [];
-        const existing = values.findIndex((item) => item.id === node.id);
-        if (existing >= 0) values.splice(existing, 1);
+        const key = relationship_key(node.world.world_id, node.metadata.user_id ?? node.provenance.created_by, conversation_id);
+        const values = this.conversation_nodes.get(key) ?? [];
+        if (this.conversation_members.has(node.id)) {
+            const existing = values.at(-1)?.id === node.id ? values.length - 1 : values.findIndex((item) => item.id === node.id);
+            if (existing >= 0) values.splice(existing, 1);
+        }
+        this.conversation_members.add(node.id);
+        if (!values.length || values[values.length - 1].temporal.observed_at <= node.temporal.observed_at) {
+            values.push(node);
+            this.conversation_nodes.set(key, values);
+            return;
+        }
         let low = 0;
         let high = values.length;
         while (low < high) {
@@ -416,10 +479,10 @@ export class IngestEngine {
             else high = middle;
         }
         values.splice(low, 0, node);
-        this.conversation_nodes.set(conversation_id, values);
+        this.conversation_nodes.set(key, values);
     }
 
-    private previous_conversation_node(conversation_id: string, observed_at: number): HydroNode | undefined {
+    private previous_conversation_node(conversation_id: string, observed_at: number, exclude_id: string): HydroNode | undefined {
         const values = this.conversation_nodes.get(conversation_id) ?? [];
         let low = 0;
         let high = values.length;
@@ -428,6 +491,7 @@ export class IngestEngine {
             if (values[middle].temporal.observed_at <= observed_at) low = middle + 1;
             else high = middle;
         }
+        if (low > 0 && values[low - 1].id === exclude_id) low--;
         return low > 0 ? values[low - 1] : undefined;
     }
 
@@ -439,6 +503,7 @@ export class IngestEngine {
         this.current_claim_nodes.clear();
         this.grounding_nodes.clear();
         this.conversation_nodes.clear();
+        this.conversation_members.clear();
         for (const node of this.graph.node_list().sort((left, right) => left.temporal.observed_at - right.temporal.observed_at)) {
             this.register_relationship_node(node);
         }

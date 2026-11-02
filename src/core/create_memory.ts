@@ -21,7 +21,7 @@ import { MemorySketches } from './math/sketches.js';
 import { create_hydro_edge, DurableGraph } from './memory/durable_graph.js';
 import { decay_node, project_node_decay, reinforce_node, type decay_policy, type decay_tier } from './memory/decay_engine.js';
 import { InMemoryRecallIndex } from './recall/candidate_selection.js';
-import { associative_recall, type AssociativeRecallResult } from './recall/associative_recall.js';
+import { associative_recall, associative_policy_from_env, type AssociativeRecallResult, type associative_policy } from './recall/associative_recall.js';
 import { grounded_recall, type GroundedRecallResult } from './recall/grounded_recall.js';
 import { historical_recall, type HistoricalRecallResult } from './recall/historical_recall.js';
 import { strict_recall, type StrictRecallResult } from './recall/strict_recall.js';
@@ -78,6 +78,7 @@ export type memory_config = {
     multilingual_embedding_provider?: multilingual_embedding_provider;
     fallback_language?: language_code;
     decay_policy?: Partial<decay_policy>;
+    associative_policy?: Partial<associative_policy>;
 };
 
 export type decay_cycle_params = {
@@ -143,6 +144,7 @@ export type timeline_params = {
     recorded_time?: number;
     world_id?: string;
     entity_names?: string[];
+    permission_context?: GateContext['permission_context'];
 };
 
 export type memory_stats = {
@@ -245,6 +247,8 @@ const embed = async (
 export function create_memory(config: memory_config = {}): long_memory {
     const cfg = { ...defaults, ...config };
     if (!Number.isInteger(cfg.embedding_cache_size) || cfg.embedding_cache_size < 0) throw new Error('embedding_cache_size must be a non-negative integer');
+    // live env edits never reach an already-open instance; re-create to pick up new flags.
+    const recall_policy = associative_policy_from_env(process.env, config.associative_policy);
     const multilingual_embeddings = config.multilingual_embedding_provider ?? new deterministic_multilingual_embeddings(cfg.embedding_dimension);
     const embedding_cache = new bounded_embedding_cache(cfg.embedding_cache_size);
     let store: SqliteStore | null = null;
@@ -461,7 +465,7 @@ export function create_memory(config: memory_config = {}): long_memory {
                     token_budget: query.token_budget ?? cfg.max_context_tokens,
                     min_confidence: query.min_confidence,
                     permission_context: query.permission_context,
-                }, { ...deps(), edges: engine.graph.edge_list() });
+                }, { ...deps(), edges: engine.graph.edge_list() }, recall_policy);
             }
             return strict_recall({
                 text: query.text, now, at: query.at, world_id: query.world_id,
@@ -513,6 +517,7 @@ export function create_memory(config: memory_config = {}): long_memory {
                 recorded_time: params.recorded_time,
                 world_id: params.world_id,
                 entity_names: params.entity_names,
+                permission_context: params.permission_context,
             }, { ...deps(), supersedes_edges: engine.graph.edge_list() });
         },
         async getStats() {
@@ -549,6 +554,12 @@ export function create_memory(config: memory_config = {}): long_memory {
                 if (!node.source_type || !node.external_id || !node.recorded_at || !node.provenance) {
                     throw new Error(`connector node ${node.key} is missing source identity, recorded_at, or provenance`);
                 }
+            }
+            // The import transaction is synchronous, so embed before entering it, as ingest() does.
+            const vectors = new Map<(typeof plan.nodes_to_create)[number], number[] | null>();
+            for (const node of plan.nodes_to_create) {
+                const language = detect_language(node.content).language ?? cfg.default_language;
+                vectors.set(node, await embed(cfg.embedding_provider, multilingual_embeddings, embedding_cache, node.content, language, 'document'));
             }
             return import_transaction().run(() => {
                 const before_nodes = new Set(engine.graph.node_list().map((node) => node.id));
@@ -611,6 +622,7 @@ export function create_memory(config: memory_config = {}): long_memory {
                         id: node.id,
                         user_id: cfg.user_id,
                         text: node.content,
+                        vector: vectors.get(node),
                         at: node.recorded_at,
                         observed_at: node.observed_at,
                         valid_from: node.valid_from,

@@ -17,11 +17,12 @@
 > **Durable, temporal, governed memory for AI agents. Not just RAG. Not just a vector database. Local-first and self-hosted.**
 
 [![npm](https://img.shields.io/npm/v/longmemory.svg)](https://www.npmjs.com/package/longmemory)
+[![PyPI](https://img.shields.io/pypi/v/longmemory-sdk.svg)](https://pypi.org/project/longmemory-sdk/)
 [![VS Code](https://img.shields.io/badge/VS%20Code-LongMemory-007ACC?logo=visualstudiocode)](https://marketplace.visualstudio.com/items?itemName=CaviraOSS.longmemory-vscode)
 [![Container](https://img.shields.io/badge/GHCR-longmemory-2496ED?logo=docker)](https://github.com/CaviraOSS/LongMemory/pkgs/container/longmemory)
 [![License](https://img.shields.io/github/license/CaviraOSS/LongMemory)](LICENSE)
 
-![LongMemory dashboard](.github/longmemory.png)
+![LongMemory dashboard](.github/longmemory.gif)
 
 LongMemory is a cognitive memory engine for LLM applications and autonomous agents.
 
@@ -65,6 +66,11 @@ await memory.close();
 
 No service or external database is required for in-memory use.
 
+For optional evidence-grounded answers with your own model, use the exported
+`answer_from_evidence` adapter. It accepts authorized evidence, validates cited
+excerpts, and makes at most one model call; ordinary recall is unchanged.
+See [docs/answering.md](docs/answering.md) for policies, limits, and integration.
+
 ### Persist with SQLite
 
 ```ts
@@ -85,6 +91,27 @@ npm install --global longmemory
 longmemory init
 longmemory recall "current project priorities" --mode associative
 ```
+
+### Call a self-hosted server from Python
+
+```bash
+pip install longmemory-sdk
+```
+
+```python
+from longmemory import LongMemory
+
+memory = LongMemory(
+    "http://127.0.0.1:7331",
+    api_key="change-me",
+    user_id="alice",
+)
+
+memory.ingest("I prefer TypeScript")
+result = memory.recall("What language do I prefer?", mode="strict")
+```
+
+The Python package is a zero-dependency HTTP client. The Hydrograph engine remains in the self-hosted TypeScript service. See [docs/python-sdk.md](docs/python-sdk.md).
 
 ---
 
@@ -375,6 +402,15 @@ longmemory port --from codex --to longmemory --all
 
 See [MIGRATION.md](MIGRATION.md) and [docs/migration.md](docs/migration.md).
 
+Legacy package migration:
+
+```bash
+npm uninstall openmemory-js && npm install longmemory
+pip uninstall openmemory-py && pip install longmemory-sdk
+```
+
+`openmemory-js@2` and `openmemory-py@2` are forwarding bridges for existing installations. New applications should use `longmemory` and `longmemory-sdk` directly. PyPI's unrelated `longmemory` name is owned by another project, so the official distribution is `longmemory-sdk` while the import remains `longmemory`.
+
 ---
 
 ## 14. Release and Operations
@@ -649,14 +685,21 @@ validator.
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/RockinPaul">
+                    <img src="https://avatars.githubusercontent.com/u/3741448?v=4" width="100;" alt="RockinPaul"/>
+                    <br />
+                    <sub><b>Paul Zarudnev</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
                 <a href="https://github.com/oantoshchenko">
                     <img src="https://avatars.githubusercontent.com/u/1749531?v=4" width="100;" alt="oantoshchenko"/>
                     <br />
                     <sub><b>Oleksandr Antoshchenko</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/lwsinclair">
                     <img src="https://avatars.githubusercontent.com/u/2829939?v=4" width="100;" alt="lwsinclair"/>
@@ -692,6 +735,8 @@ validator.
                     <sub><b>Dhravya Shah</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/dflor003">
                     <img src="https://avatars.githubusercontent.com/u/103017?v=4" width="100;" alt="dflor003"/>
@@ -699,8 +744,6 @@ validator.
                     <sub><b>Danil Flores</b></sub>
                 </a>
             </td>
-		</tr>
-		<tr>
             <td align="center">
                 <a href="https://github.com/DAESA24">
                     <img src="https://avatars.githubusercontent.com/u/173488786?v=4" width="100;" alt="DAESA24"/>
@@ -723,8 +766,8 @@ validator.
                 </a>
             </td>
             <td align="center">
-                <a href="https://github.com/Anush008">
-                    <img src="https://avatars.githubusercontent.com/u/46051506?v=4" width="100;" alt="Anush008"/>
+                <a href="https://github.com/anush008">
+                    <img src="https://avatars.githubusercontent.com/u/46051506?v=4" width="100;" alt="anush008"/>
                     <br />
                     <sub><b>Anush</b></sub>
                 </a>
@@ -736,6 +779,8 @@ validator.
                     <sub><b>Annel Chavez</b></sub>
                 </a>
             </td>
+		</tr>
+		<tr>
             <td align="center">
                 <a href="https://github.com/atao2004">
                     <img src="https://avatars.githubusercontent.com/u/148929819?v=4" width="100;" alt="atao2004"/>

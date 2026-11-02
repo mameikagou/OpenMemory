@@ -46,6 +46,8 @@ export type dataset_load = {
     official: boolean;
     source: string;
     path: string | null;
+    variant?: string;
+    total_cases?: number;
     cases: benchmark_case[];
 };
 
@@ -99,6 +101,7 @@ export interface benchmark_provider {
     initialize(config: provider_config): Promise<void>;
     health(): Promise<void>;
     reset(scope: benchmark_scope): Promise<void>;
+    cleanup?(scope: benchmark_scope): Promise<void>;
     ingest(events: benchmark_event[], scope: benchmark_scope): Promise<ingest_result>;
     await_indexing(result: ingest_result, scope: benchmark_scope, progress?: (value: indexing_progress) => void): Promise<void>;
     search(query: string, limit: number, scope: benchmark_scope): Promise<search_hit[]>;
@@ -260,6 +263,8 @@ export type run_manifest = {
     };
     providers: provider_manifest[];
     datasets: dataset_name[];
+    dataset_coverage?: Record<string, { variant: string; selected: number; total: number | null }>;
+    retrieval_options?: { session_coverage: boolean; evidence_rerank?: boolean; evidence_rerank_version?: number; calendar_rerank?: boolean; derivation_rerank?: boolean };
     case_ids: string[];
     case_datasets: Record<string, dataset_name>;
     cutoffs: number[];
@@ -279,6 +284,7 @@ export type run_manifest = {
     } | null;
     ai: {
         enabled: boolean;
+        protocol_version?: number;
         answerer: ai_model_manifest | null;
         judge: ai_model_manifest | null;
         per_cutoff: true;
